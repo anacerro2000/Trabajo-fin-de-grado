@@ -1,0 +1,1299 @@
+---
+title: "Trabajo Fin de grado: Aplicación del procesamiento del lenguaje natural de los verbatims a los sistemas de valoración de clientes, en una cadena multinacional de retail"
+author: "Ana Cerro"
+date: "02/3/2022"
+output: html_document
+---
+
+# 1. PROCESO DE DESCARGA DE DATOS
+
+# LIBRERIAS
+```{r, warning=FALSE}
+library(rlang)
+#library(qdap)
+library(tm) # Para editar el texto: quitar puntuacion, etc. 
+library(corpus) # Para analizar el corpus del texto
+library(tidytext) # Para hacer analisis de sentimiento
+library(jsonlite)
+library(tidyverse) # Para hacer analisis de sentimiento
+library(wordcloud) # Para hacer wordclouds
+library(wordcloud2) # Otra alternativa para hacer wordclouds
+library(RColorBrewer) # Para cambiar la gma de colores
+library(tidyr) # Para poder hacer un unnest tokens
+library(dplyr) # Para gestionar objetos en R
+library(purrr) # Para gestionar objetos en R
+library(stringr) # Para gestionar objetos en R
+library(scales) # Para gestionar objetos en R
+library(ggplot2) # Para realizar graficos
+#library(qdap) # Para conjuntos de palabras
+library(maps) # Para graficar los tweets
+library(readr) # Para grabar archivos csv
+library(rvest) # Para hacer Web scraping
+library(rebus) # Para resolver los problemas de Web scraping
+library(lubridate) # Para analisis temporal de los tweets
+library(igraph) # Para realizar redes de n-gramas
+library(stopwords)
+library(TSstudio)
+library(e1071) # Para ajustar un modelo SVM
+library(caret) # Algoritmos machine learning
+library(syuzhet) # Para hacer analisis de sentimiento
+library(quanteda) # Para construir ma matriz tf-idf
+```
+
+# 2. LIMPIEZA Y TOKENIZACION TWEETS
+
+## 2.1 Material de Ayuda
+El proceso de limpieza de texto, dentro del ambito de text mining, consiste en eliminar del texto y todo aquello que no aporte informacion sobre su tematica, estructura o contenido. No existe una unica forma de hacerlo, depende en gran medida de la finalidad del analisis y de la fuente de la que proceda el texto.
+Definir una funcion que contenga cada uno de los pasos de limpieza tiene la ventaja de poder adaptarse facilmente dependiendo del tipo de texto analizado.
+```{r}
+limpiar_tokenizar <- function(texto){
+ 
+  # Primero se convierte todo el texto a minusculas
+  nuevo_texto <- tolower(texto)
+  
+  # Eliminamos los signos de puntuacion
+  nuevo_texto <- str_replace_all(nuevo_texto,"[[:punct:]]", " ")
+  
+  # Eliminamos los numeros
+  nuevo_texto <- str_replace_all(nuevo_texto,"[[:digit:]]", " ")
+  
+  # Eliminamos los espacios en blanco multiples
+  nuevo_texto <- str_replace_all(nuevo_texto,"[\\s]+", " ")
+  
+  # Realizamos el proceso de tokenizacion por palabras individuales
+  nuevo_texto <- str_split(nuevo_texto, " ")[[1]]
+  
+  # Finalmente eliminamos los tokens con una longitud < 2
+  nuevo_texto <- keep(.x = nuevo_texto, .p = function(x){str_length(x) > 1})
+  return(nuevo_texto)
+}
+```
+
+Clasifico en tres grupos (Detractor, Neutro y Promotor) en función de la puntuación del cliente. 
+```{r}
+Datos_distribuidora$tipo_puntuacion = ifelse(Datos_distribuidora$puntuacion <= 6,'Detractor',ifelse(Datos_distribuidora$puntuacion == 7 | Datos_distribuidora$puntuacion == 8,'Pasivo',ifelse(Datos_distribuidora$puntuacion == 9 | Datos_distribuidora$puntuacion == 10, 'Promotor','Error')))
+```
+
+```{r}
+Datos_distribuidora <- Datos_distribuidora[!is.na(Datos_distribuidora$id),]
+```
+
+Eliminamos filas con valores nulos en los comentarios y en las puntuaciones
+```{r}
+datos_sin_NA_0 <- Datos_distribuidora[!is.na(Datos_distribuidora$puntuacion),]
+datos_sin_NA <- datos_sin_NA_0[!is.na(datos_sin_NA_0$comentarios),]
+#datos_sin_NA
+```
+
+
+
+Aplicamos la funcion de limpieza y tokenizacion a cada comentario analizado 
+```{r}
+Datos_limpios <- datos_sin_NA %>% dplyr::mutate(texto_tokenizado = purrr::map(.x = datos_sin_NA$comentarios, .f= limpiar_tokenizar))
+```
+
+
+```{r}
+Datos_limpios$texto_tokenizado
+```
+
+
+Por ejemplo, vamos a ver cual es el texto tokenizado de las dos primeras reseñas
+```{r}
+Datos_limpios %>% slice(1) %>% select(texto_tokenizado) %>% pull()
+Datos_limpios %>% slice(2) %>% select(texto_tokenizado) %>% pull()
+
+```
+
+Notad que previamente a la division del texto, los elementos de estudio eran los comenatrios, y cada uno se encontraba en una fila, cumpliendo asi la condicion de tidy data: una observacion, una fila. Al realizar la tokenizacion, el elemento de estudio ha pasado a ser cada token (palabra), incumpliendo asi la condicion de tidy data.
+
+Para volver de nuevo a la estructura ideal se tiene que expandir cada lista de tokens, 
+duplicando el valor de las otras columnas tantas veces como sea necesario. A este proceso se le conoce como expansion o unnest.
+```{r}
+datos_tidy <- Datos_limpios %>% select(-comentarios) %>% tidyr::unnest(cols = c(texto_tokenizado))
+datos_tidy <- datos_tidy %>% dplyr::rename(token = texto_tokenizado)
+datos_tidy <- datos_tidy[!is.na(datos_tidy$token),]
+head(datos_tidy)
+```
+
+Limpiamos el corpus incorporandoa a la lista de stopwords con palabras en espaniol aquellas que consideramos necesarias y que han de ser eliminadas. 
+```{r limpiamos el corpus}
+lista_stopwords <- c(stopwords(language = "es"))
+lista_stopwords_en <- stopwords(language = "en")
+lista_stopwords<- c(lista_stopwords, 'la')
+lista_stopwords<- c(lista_stopwords,'le')
+lista_stopwords<- c(lista_stopwords,'hipermercado')
+lista_stopwords<- c(lista_stopwords, 'comida')
+lista_stopwords<- c(lista_stopwords, '')
+lista_stopwords<- c(lista_stopwords, 'NA')
+lista_stopwords<- c(lista_stopwords, NA)
+lista_stopwords<- c(lista_stopwords, 'ufuffd')
+lista_stopwords<- c(lista_stopwords, 'uffa')
+lista_stopwords<- c(lista_stopwords,lista_stopwords_en)
+lista_stopwords <- c(lista_stopwords, "hoy")
+lista_stopwords <- c(lista_stopwords, "producto")
+lista_stopwords <- c(lista_stopwords, "productos")
+lista_stopwords <- c(lista_stopwords, "gracias")
+lista_stopwords <- c(lista_stopwords, "ademas")
+lista_stopwords <- c(lista_stopwords, "hace")
+lista_stopwords <- c(lista_stopwords, "gracias")
+lista_stopwords <- c(lista_stopwords, "mas")
+lista_stopwords <- c(lista_stopwords, "bien")
+lista_stopwords <- c(lista_stopwords, "buen")
+lista_stopwords <- c(lista_stopwords, "buenos")
+lista_stopwords <- c(lista_stopwords, "buenas")
+lista_stopwords <- c(lista_stopwords, "buena")
+
+datos_tidy2 <- datos_tidy %>% filter(!(token %in% lista_stopwords))
+
+```
+
+
+
+# EXPLORACIÓN 
+
+## 1. Puntuaciones
+
+### 1.1 Cantidad de clientes que enviaron una reseña
+```{r}
+# Obtenemos una lista de los 24.131 clientes que han puntuado
+length(unique(Datos_distribuidora$id))
+```
+
+
+```{r}
+#Cantidad de puntuaciones positivas (promotor)
+nrow(Datos_distribuidora[Datos_distribuidora$tipo_puntuacion == "Promotor", ])
+nrow(Datos_distribuidora[Datos_distribuidora$tipo_puntuacion == "Promotor", ])/length(Datos_distribuidora$tipo_puntuacion)
+datos_ti
+nrow(datos_sin_NA[datos_sin_NA$tipo_puntuacion == "Promotor", ])
+nrow(datos_sin_NA[datos_sin_NA$tipo_puntuacion == "Promotor", ])/length(datos_sin_NA$tipo_puntuacion)
+```
+
+```{r}
+#Cantidad de puntuaciones neutras (neutras)
+nrow(Datos_distribuidora[Datos_distribuidora$tipo_puntuacion == "Pasivo", ])
+nrow(Datos_distribuidora[Datos_distribuidora$tipo_puntuacion == "Pasivo", ])/length(Datos_distribuidora$tipo_puntuacion)
+
+#Cantidad de puntuaciones neutras (neutras) con verbatim
+nrow(datos_sin_NA[datos_sin_NA$tipo_puntuacion == "Pasivo", ])
+nrow(datos_sin_NA[datos_sin_NA$tipo_puntuacion == "Pasivo", ])/length(datos_sin_NA$tipo_puntuacion)
+```
+
+
+```{r}
+#Cantidad de puntuaciones negativas (detractor)
+nrow(Datos_distribuidora[Datos_distribuidora$tipo_puntuacion == "Detractor", ])
+nrow(Datos_distribuidora[Datos_distribuidora$tipo_puntuacion == "Detractor", ])/length(Datos_distribuidora$tipo_puntuacion)
+
+#Cantidad de puntuaciones negativas (detractor) con verbatim
+nrow(datos_sin_NA[datos_sin_NA$tipo_puntuacion == "Detractor", ])
+nrow(datos_sin_NA[datos_sin_NA$tipo_puntuacion == "Detractor", ])/length(datos_sin_NA$tipo_puntuacion)
+```
+
+
+```{r}
+#Proporción de puntuaciones totales
+ggplot(data = datos_sin_NA_0) + geom_bar(mapping = aes(x = tipo_puntuacion), fill = c('red','lightblue', 'lightgreen')) + coord_flip() + theme_bw() + labs(title = "Gráfico de frecuencias de puntuaciones", x = "Tipo de puntuación", y = "Total de puntuaciones")
+
+#Proporción de puntuaciones con verbatim
+ggplot(data = datos_sin_NA) + geom_bar(mapping = aes(x = tipo_puntuacion), fill = c('red','lightblue', 'lightgreen')) + coord_flip() + theme_bw() + labs(title = "Gráfico de frecuencias de puntuaciones", x = "Tipo de puntuación", y = "Total de puntuaciones con verbatim")
+```
+
+## 2. Comentarios
+### 1.1 Cantidad de usuarios que mandaron una reseña
+```{r}
+# Obtenemos una lista de los 332.707 clientes que han puesto una reseña. por lo tanto, los clientes suelen poner varias reseñas.
+length(unique(Datos_distribuidora$id))
+length((Datos_distribuidora$id))
+```
+
+
+```{r, eval=FALSE, echo=FALSE}
+# Vamos a obtener un grafico mejor que el anterior considerando solo las localizaciones top (> 20 clientes) 
+Datos_distribuidora %>%
+  count(ciudad_tienda) %>%
+  mutate(location = reorder(ciudad_tienda, n)) %>%
+  top_n(20) %>%
+  ggplot(aes(x = location, y = n , fill = ciudad_tienda)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = "Localizacion",
+       y = "Frecuencia",
+       title = "Localizaciones top") +
+  theme(legend.position="none")
+```
+
+## 2.2 Funciones propias
+
+### A) Funcion 'actividad_tweets'
+Función que devuelve diferentes gráficos sobre el comportamiento de las reseñas:
+
+- Gráfico temporal de la actividad de las reseñas
+- Nº total de palabras utilizadas en las reseñas en un periodo de tiempo
+- Nº de palabras distintas utilizadas en dicho periodo de tiempo
+- Longitud media de las reseñas
+
+
+```{r}
+actividad_comentarios <- function(datos_tidy){
+
+#Transformo la fecha y hago una variable solo con mes y año (Funciona)  
+datos_tidy2$fecha_encuesta <- strptime(as.character(datos_tidy2$fecha_encuesta), "%Y-%m-%d")
+datos_mes_anyo <- datos_tidy2 %>% mutate(mes_anyo = format(fecha_encuesta, "%Y-%m"))
+datos_mes_anyo <- datos_mes_anyo %>% group_by(tipo_puntuacion, mes_anyo) %>% dplyr::summarise(n = n())
+
+#Gráfico 1: linea temporal del numero de reseñas enviadas 
+
+plot_actividad <-  ggplot(datos_mes_anyo ,aes(x = mes_anyo, y = n, color = tipo_puntuacion)) +
+  geom_line(aes(group = tipo_puntuacion)) +
+   scale_color_manual(values=c('red','lightblue', 'lightgreen'))+
+  labs(title = "Número de reseñas enviadas", x = "fecha de publicación",
+       y = "número de reseñas") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, size = 6),
+        legend.position = "bottom")
+
+#longitud media utilizada por cada segmento de cliente
+datos_tidy_sum_words <- datos_tidy2 %>% group_by(tipo_puntuacion) %>% dplyr::summarise(n = n())  
+datos_tidy_sum_words
+
+plot_actividad1 <-ggplot(datos_tidy_sum_words, aes(fill=tipo_puntuacion, y= tipo_puntuacion, x= n)) + 
+    geom_bar(position="dodge", stat="identity",fill = c('red','lightblue', 'lightgreen'))+
+  geom_text(aes(label=n), vjust=1.6, color="black",
+            position = position_dodge(0.9), size=3, angle= 90)+
+          ggtitle("Total de palabras utilizadas")
+
+
+# Palabras distintas utilizadas por cada segmento de puntuación 
+num_distinct <-datos_tidy %>% select(tipo_puntuacion, token) %>% distinct() %>%  group_by(tipo_puntuacion) %>%
+  dplyr::summarise(palabras_distintas = n())
+
+plot_actividad2 <-ggplot(num_distinct, aes(fill=tipo_puntuacion, y= tipo_puntuacion, x=palabras_distintas)) + 
+    geom_bar(position="dodge", stat="identity",fill = c('red','lightblue', 'lightgreen'))+
+    geom_text(aes(label=palabras_distintas), vjust=1.6, color="black",
+            position = position_dodge(0.9), size=3, angle= 90)+
+    ggtitle("Palabras distintas utilizadas")
+
+datos_tidy_meantweets <- datos_tidy %>% group_by(tipo_puntuacion, id) %>% dplyr::summarise(longitud = n()) %>% group_by(tipo_puntuacion) %>%dplyr::summarise(media_longitud = mean(longitud), sd_longitud = sd(longitud))
+
+#Longotud media de palabras utilizadas en cada reseña
+plot_actividad3 <-ggplot(datos_tidy_meantweets, aes(fill=tipo_puntuacion, y= media_longitud, x= tipo_puntuacion)) + 
+    geom_bar(position="dodge", stat="identity",fill = c('red','lightblue', 'lightgreen'))+
+    geom_errorbar(aes(ymin = media_longitud - sd_longitud,
+                    ymax = media_longitud + sd_longitud)) + coord_flip() + theme_bw()+
+  geom_text(aes(label=round(media_longitud)), vjust=1.6, color="black",
+            position = position_dodge(0.9), size=3.5)+ 
+          ggtitle("Longitud media de reseñas")
+return(list(plot_actividad,plot_actividad1,plot_actividad2,plot_actividad3))
+}
+```
+
+
+
+### C) Funcion 'grafico_frecuencias' 
+Calcula las palabras mas utilizadas por cada rango de puntuación.
+```{r}
+
+grafico_frecuencias <- function(datos_tidy2){
+# Nuevamente vemos las palabras mas utilizadas por segmento de puntuación tras eliminar las stopwords
+
+# 3.2.6 Representacion grafica de las frecuencias
+datos_frecuencias <-datos_tidy2 %>% group_by(tipo_puntuacion, token) %>% dplyr::count(token) %>% group_by(tipo_puntuacion) %>%
+  dplyr::top_n(10, n) %>% dplyr::arrange(tipo_puntuacion, desc(n))
+
+plot_frecuencias<- ggplot(datos_frecuencias,aes(x = reorder(token,n), y = n, fill = tipo_puntuacion)) +
+  geom_col() + 
+  theme_bw() +
+   scale_fill_brewer(palette="Set2")+
+  labs(y = "", x = "") +
+  theme(legend.position = "none") +
+  coord_flip() +
+  facet_wrap(~tipo_puntuacion ,scales = "free", ncol = 1, drop = TRUE) + ggtitle("Frecuencias de palabras en función del segmento")
+return(plot_frecuencias)
+}
+```
+
+
+## 2.3 Analisis exploratorio
+
+### 1.	Distribución temporal
+### 2.	Frecuencia de palabras
+
+En este caso nos centraremos en 7 indicadores para conocer en mayor profundidad las características de la escritura de cada uno de nuestros personajes, siendo estos;
+
+- 2.1	Total de palabras utilizadas por cada segmento
+- 2.2	Total de palabras distintas utilizadas por cada segmento
+- 2.3	Longitud media de las reseñas por segmento
+- 2.4	Palabras más utilizadas por segmento
+- 2.6	Representación gráfica de frecuencias
+- 2.7	Wordcloud o Nube de palabras 
+
+Tokenizamos datos y visualizamos la actividad de las reseñas
+```{r grafico de actividad y estadisticos de frecuencia de palabras}
+grafico_actividad <- actividad_comentarios(datos_tidy)
+grafico_actividad
+```
+
+Visualizamos los graficos de frecuencia de palabras según los segmentos de puntuación. Anteriormente hemos eliminado las llamadas stopwords para que se muestren en el gráfico solo las palabras relevantes más repetidas. 
+```{r grafico de frecuencias 'bonito'}
+frecuencias  <- grafico_frecuencias(datos_tidy2)
+frecuencias
+```
+A continuación se visualizará el mismo grafico pero en funcion de la variable habitoscompra y agrupado_cv
+```{r}
+#Hábitos de compra
+datos_prueba_habitos <- datos_tidy2
+
+dfs <- split(datos_prueba, f = list(datos_prueba$habitoscompra))
+#dfs
+
+lapply(dfs, grafico_frecuencias)
+
+#Agrupado
+datos_prueba_habitos <- datos_tidy2
+
+dfs <- split(datos_prueba, f = list(datos_prueba$agrupado_cv))
+#dfs
+
+lapply(dfs, grafico_frecuencias)
+
+```
+
+dividimos los datos en tres agrupaciones en función de los segmentos de puntuación para acciones futuras.
+```{r}
+datos_Detractor = (datos_tidy2 %>% filter(datos_tidy2$tipo_puntuacion == 'Detractor'))
+datos_Promotor = (datos_tidy2 %>% filter(datos_tidy2$tipo_puntuacion == 'Promotor'))
+datos_neutro = (datos_tidy2 %>% filter(datos_tidy2$tipo_puntuacion == 'pasivo'))
+```
+
+Procedemos a elaborar los wordcloud para cada segmento
+```{r}
+#segmento de puntuaciones detractores
+count_dataframe = datos_Detractor %>% count(token)
+wordcloud(words = count_dataframe$token, freq = count_dataframe$n, max.words = 50, colors=brewer.pal(8, "Dark2"))
+
+#segmento de puntuaciones promotores
+count_dataframe = datos_Promotor %>% count(token)
+wordcloud(words = count_dataframe$token, freq = count_dataframe$n, max.words = 50, colors=brewer.pal(8, "Dark2"))
+```
+
+
+### 3.	Correlación entre segmento por palabras utilizadas
+- correlacion por segmentos de puntuación
+Comprobamos ahora el grado de relacion entre palabras utilizadas por el segmento detractor y promotor
+
+```{r}
+datos_spread <- datos_tidy2 %>% group_by(tipo_puntuacion, token) %>% dplyr::count(token) %>%
+  spread(key = tipo_puntuacion, value = n, fill = NA, drop = TRUE)
+
+datos_spread[is.na(datos_spread)] <- 0
+# En este caso, las variables a correlacionar son los segmentos de puntuación.
+cor.test(~ Detractor + Promotor, method = "pearson", data = datos_spread)
+
+# Graficamente podemos ver esa correlacion del siguiente modo (localizar palabras)
+ggplot(datos_spread, aes(Detractor, Promotor)) +
+  geom_jitter(alpha = 0.1, size = 2.5, width = 0.25, height = 0.25) +
+  geom_text(aes(label = token), check_overlap = TRUE, vjust = 1.5) +
+  scale_x_log10(labels = percent_format()) +
+  scale_y_log10(labels = percent_format()) +
+  geom_abline(color = "red") +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank()) + labs(x = "Palabras detractor",
+       y = "Palabras promotor",
+       title = "Correlación entre segmentos por palabras utilizadas")
+```
+
+y como seria interesante, analizamos el numero de palabras comunes 
+```{r}
+# Para poder valorar adecuadamente el nivel de correlacion seria interesante conocer el 
+# numero de palabras comunes entre cada par de segmentos
+palabras_comunes <- dplyr::intersect(datos_tidy2 %>% filter(tipo_puntuacion=="Detractor") %>%
+                                       select(token), datos_tidy2 %>% filter(tipo_puntuacion=="Promotor") %>%
+                                       select(token)) %>% nrow()
+paste("Numero de palabras comunes entre el segmento Negativo y Promotor: ", palabras_comunes)
+```
+
+
+### 4.	Comparación en el uso de palabras
+
+y la comparacion en su uso
+- Segmento de puntuacion 
+```{r}
+# En este punto estudiaremos que palabras se utilizan de forma mas diferenciada por cada 
+# usuario, es decir, palabras que utiliza mucho un segmento y que no utiliza el otro.
+# Una forma de hacer este analisis es mediante el log of odds ratio (cociente de probabilidades) 
+# de las frecuencias.
+
+# Para realizar este calculo es necesario que, para todos los usuarios, se cuantifique 
+# la frecuencia de cada una de las palabras que aparecen en el conjunto de comentarios, es decir, 
+# si un segmento no ha utilizado una de las palabras que si ha utilizado otro, debe aparecer 
+# esa palabra en su registro con frecuencia igual a cero. Hay una serie de pasos:
+
+# Pivotaje y despivotaje
+datos_spread <- datos_tidy2 %>% group_by(tipo_puntuacion, token) %>% dplyr::count(token) %>%
+  spread(key = tipo_puntuacion, value = n, fill = 0, drop = TRUE)
+datos_unpivot <- datos_spread %>% gather(key = "tipo_puntuacion", value = "n", -token)
+
+
+# Seleccion de los segmentos detractor y promotor
+datos_unpivot <- datos_unpivot %>% filter(tipo_puntuacion %in% c("Detractor",
+                                                         "Promotor"))
+
+# Se anade el total de palabras de cada segmento
+datos_unpivot <- datos_unpivot %>% left_join(datos_tidy2 %>% group_by(tipo_puntuacion) %>%
+                  dplyr::summarise(N = n()), by = "tipo_puntuacion")
+
+
+# Calculo de odds y log of odds de cada palabra
+datos_logOdds <- datos_unpivot %>%  mutate(odds = (n + 1) / (N + 1))
+datos_logOdds <- datos_logOdds %>% select(tipo_puntuacion, token, odds) %>% 
+  spread(key = tipo_puntuacion, value = odds)
+#view(datos_logOdds)
+
+datos_logOdds <- datos_logOdds %>%  mutate(log_odds = log(Detractor/Promotor),
+                                             abs_log_odds = abs(log_odds))
+
+# Si el logaritmo de odds es mayor que cero, significa que es una palabra con
+# mayor probabilidad de ser de Elon Musk. Esto es asi porque el ratio se ha
+# calculado como Detractor/Promotor.
+datos_logOdds <- datos_logOdds %>% mutate(segmento_frecuente = if_else(log_odds > 0,
+                  "Detractor", "Promotor"))
+datos_logOdds %>% arrange(desc(abs_log_odds)) %>% head()
+
+# Ahora representamos, por ejemplo, las 30 palabras mas diferenciadas ya que 
+# esas palabras posiblemente tendran mucho peso a la hora de clasificar las reseñas
+datos_logOdds %>% group_by(segmento_frecuente) %>% top_n(15, abs_log_odds) %>%
+  ggplot(aes(x = reorder(token, log_odds), y = log_odds, fill = segmento_frecuente)) +
+  geom_col() + labs(x = "palabra", y = "log odds ratio (Detractor/Promotor)") +
+  coord_flip() + theme_bw() + ggtitle("Comparación en el uso de palabra2")
+
+
+```
+- MAYORES - JOVENES
+```{r}
+
+# Pivotaje y despivotaje
+datos_spread <- datos_tidy2 %>% group_by(agrupado_cv, token) %>% dplyr::count(token) %>%
+  spread(key = agrupado_cv, value = n, fill = 0, drop = TRUE)
+datos_unpivot <- datos_spread %>% gather(key = "agrupado_cv", value = "n", -token)
+
+# Seleccion de los segmentos negativo y Promotor
+datos_unpivot <- datos_unpivot %>% filter(agrupado_cv %in% c("JOVENES",
+                                                         "MAYORES"))
+
+# Se anade el total de palabras de cada segmento
+datos_unpivot <- datos_unpivot %>% left_join(datos_tidy2 %>% group_by(agrupado_cv) %>%
+                  dplyr::summarise(N = n()), by = "agrupado_cv")
+
+
+# Calculo de odds y log of odds de cada palabra
+datos_logOdds <- datos_unpivot %>%  mutate(odds = (n + 1) / (N + 1))
+datos_logOdds <- datos_logOdds %>% select(agrupado_cv, token, odds) %>% 
+  spread(key = agrupado_cv, value = odds)
+
+
+
+datos_logOdds <- datos_logOdds %>%  mutate(log_odds = log(JOVENES/MAYORES),
+                                             abs_log_odds = abs(log_odds))
+
+# Si el logaritmo de odds es mayor que cero, significa que es una palabra con
+# mayor probabilidad de ser de Elon Musk. Esto es asi porque el ratio se ha
+# calculado como Detractor/Positiva.
+datos_logOdds <- datos_logOdds %>% mutate(segmento_frecuente = if_else(log_odds > 0,
+                  "JOVENES", "MAYORES"))
+datos_logOdds %>% arrange(desc(abs_log_odds)) %>% head()
+
+# Ahora representamos, por ejemplo, las 30 palabras mas diferenciadas ya que 
+# esas palabras posiblemente tendran mucho peso a la hora de clasificar los tweets
+datos_logOdds %>% group_by(segmento_frecuente) %>% top_n(15, abs_log_odds) %>%
+  ggplot(aes(x = reorder(token, log_odds), y = log_odds, fill = segmento_frecuente)) +
+  geom_col() + labs(x = "palabra", y = "log odds ratio (JOVENES/MAYORES)") +
+  coord_flip() + theme_bw() + ggtitle("Comparación en el uso de palabras")
+```
+
+- FAMILIAS - BEBES
+```{r}
+# Pivotaje y despivotaje
+datos_spread <- datos_tidy2 %>% group_by(agrupado_cv, token) %>% dplyr::count(token) %>%
+  spread(key = agrupado_cv, value = n, fill = 0, drop = TRUE)
+datos_unpivot <- datos_spread %>% gather(key = "agrupado_cv", value = "n", -token)
+
+# Seleccion de los segmentos negativo y Promotor
+datos_unpivot <- datos_unpivot %>% filter(agrupado_cv %in% c("BEBES",
+                                                         "FAMILIAS"))
+
+# Se anade el total de palabras de cada autor
+datos_unpivot <- datos_unpivot %>% left_join(datos_tidy2 %>% group_by(agrupado_cv) %>%
+                  dplyr::summarise(N = n()), by = "agrupado_cv")
+
+
+# Calculo de odds y log of odds de cada palabra
+datos_logOdds <- datos_unpivot %>%  mutate(odds = (n + 1) / (N + 1))
+datos_logOdds <- datos_logOdds %>% select(agrupado_cv, token, odds) %>% 
+  spread(key = agrupado_cv, value = odds)
+
+
+
+datos_logOdds <- datos_logOdds %>%  mutate(log_odds = log(BEBES/FAMILIAS),
+                                             abs_log_odds = abs(log_odds))
+
+# Si el logaritmo de odds es mayor que cero, significa que es una palabra con
+# mayor probabilidad de ser de Elon Musk. Esto es asi porque el ratio se ha
+# calculado como Detractor/Positiva.
+datos_logOdds <- datos_logOdds %>% mutate(segmento_frecuente = if_else(log_odds > 0,
+                  "BEBES", "FAMILIAS"))
+datos_logOdds %>% arrange(desc(abs_log_odds)) %>% head()
+
+# Ahora representamos, por ejemplo, las 30 palabras mas diferenciadas ya que 
+# esas palabras posiblemente tendran mucho peso a la hora de clasificar los tweets
+datos_logOdds %>% group_by(segmento_frecuente) %>% top_n(15, abs_log_odds) %>%
+  ggplot(aes(x = reorder(token, log_odds), y = log_odds, fill = segmento_frecuente)) +
+  geom_col() + labs(x = "palabra", y = "log odds ratio (BEBES/FAMILIAS)") +
+  coord_flip() + theme_bw() + ggtitle("Comparación en el uso de palabras")
+```
+
+
+
+### 5.	Relación entre palabras
+
+```{r}
+# En todos los analisis anteriores, se han considerado a las palabras como unidades 
+# individuales e independientes. Esto es una simplificacion bastante grande, ya que en 
+# realidad el lenguaje se crea por combinaciones no aleatorias de palabras, es decir, 
+# determinadas palabras tienden a utilizarse de forma conjunta. A continuacion se 
+# muestran algunas formas de calcular, identificar y visualizar relaciones entre palabras.
+
+# Lo que vamos a hacer es dividir el texto por n-gramas, siendo cada n-grama una secuencia 
+# de n palabras consecutivas. Para conseguir los n-gramas, se tiene que eliminar la tokenizacion 
+# de la funcion creada 'limpiar_datos'. Luego, crearemos otra funcion en este caso.
+
+limpiar <- function(texto){
+  
+  # Se convierte todo el texto a minusculas
+  nuevo_texto <- tolower(texto)
+
+  # Eliminacion de signos de puntuacion
+  nuevo_texto <- str_replace_all(nuevo_texto,"[[:punct:]]", " ")
+  
+  # Eliminacion de numeros
+  nuevo_texto <- str_replace_all(nuevo_texto,"[[:digit:]]", " ")
+  
+  # Eliminacion de espacios en blanco multiples
+  nuevo_texto <- str_replace_all(nuevo_texto,"[\\s]+", " ")
+  
+  # Output
+  return(nuevo_texto)
+}
+```
+
+```{r}
+datos <- Datos_distribuidora[!is.na(Datos_distribuidora$comentarios),]
+datos_promotor <- datos %>% filter(datos$tipo_puntuacion == 'Promotor')
+datos_detractor <- datos %>% filter(datos$tipo_puntuacion == 'Detractor')
+print(datos_detractor)
+```
+
+```{r}
+# Obtenemos el bigramas (concatenacion de 2 palabras)
+
+bigrama <- function(datos){
+  bigramas <- datos %>% mutate(texto = limpiar(datos$comentarios)) %>%
+    select(texto) %>% unnest_tokens(input = texto, output = "bigrama",
+    token = "ngrams",n = 2, drop = TRUE)
+  
+  # Frecuencia de ocurrencias de cada bigrama
+  bigramas %>% dplyr::count(bigrama, sort = TRUE)
+  
+  # Los bigramas mas frecuentes son los formados por stopwords. Como la relacion entre 
+  # estas palabras no aporta informacion de interes, se procede a eliminar todos aquellos 
+  # bigramas que contienen alguna stopword. Separacion de los bigramas 
+  bigrams_separados <- bigramas %>% separate(bigrama, c("palabra1", "palabra2"), sep = " ")
+  
+  # Filtrado de los bigramas que contienen alguna stopword
+  bigrams_separados <- bigrams_separados  %>%
+    filter(!palabra1 %in% lista_stopwords)
+  
+  bigrams_separados <- bigrams_separados  %>%
+    filter(!palabra2 %in% lista_stopwords)
+  
+  # Union de las palabras para formar de nuevo los bigramas
+  bigramas <- bigrams_separados %>%
+    unite(bigrama, palabra1, palabra2, sep = " ")
+  
+
+  
+  # Identificamos ahora los bigramas mas frecuentes
+  return(bigramas %>% dplyr::count(bigrama, sort = TRUE))
+}
+
+```
+
+También analizaremos los trigramas más repetidos de manera que podamos entender mejor los bigramas anteriormente mencionados
+```{r}
+# Obtenemos el trigramas (concatenacion de 3 palabras)
+
+trigrama <- function(datos){
+  trigramas <- datos %>% mutate(texto = limpiar(datos$comentarios)) %>%
+    select(texto) %>% unnest_tokens(input = texto, output = "trigrama",
+    token = "ngrams",n = 3, drop = TRUE)
+  
+  # Frecuencia de ocurrencias de cada bigrama
+  trigramas %>% dplyr::count(trigrama, sort = TRUE)
+  
+  # Los bigramas mas frecuentes son los formados por stopwords. Como la relacion entre 
+  # estas palabras no aporta informacion de interes, se procede a eliminar todos aquellos 
+  # bigramas que contienen alguna stopword. Separacion de los bigramas 
+  trigrams_separados <- trigramas %>% separate(trigrama, c("palabra1", "palabra2", "palabra3"), sep = " ")
+  
+  # Filtrado de los bigramas que contienen alguna stopword
+  trigrams_separados <- trigrams_separados  %>%
+    filter(!palabra1 %in% lista_stopwords)
+  
+  trigrams_separados <- trigrams_separados  %>%
+    filter(!palabra2 %in% lista_stopwords)
+
+  trigrams_separados <- trigrams_separados  %>%
+    filter(!palabra3 %in% lista_stopwords)
+    
+  # Union de las palabras para formar de nuevo los bigramas
+  trigramas <- trigrams_separados %>%
+    unite(trigrama, palabra1, palabra2, palabra3, sep = " ") 
+  
+  #trigramas_podrido <- trigrams_separados %>% filter(palabra3 == "podrido") %>% count(palabra1, palabra2, sort = TRUE)      
+  
+  #print(trigramas_podrido)
+  
+  # Identificamos ahora los bigramas mas frecuentes
+  return(head(trigramas %>% dplyr::count(trigrama, sort = TRUE), 10))
+}
+# Una forma mas visual e informativa de analizar las relaciones entre palabras es 
+# mediante el uso de redes de n-gramas.
+```
+
+Y a continuación los unigrmas
+```{r}
+# Obtenemos el unigramas (concatenacion de 1 palabra)
+
+unigrama <- function(datos){
+  unigramas <- datos %>% mutate(texto = limpiar(datos$comentarios)) %>%
+    select(texto) %>% unnest_tokens(input = texto, output = "unigrama",
+    token = "ngrams",n = 1, drop = TRUE)
+  
+  # Frecuencia de ocurrencias de cada bigrama
+  unigramas %>% dplyr::count(unigrama, sort = TRUE)
+  
+  # Los bigramas mas frecuentes son los formados por stopwords. Como la relacion entre 
+  # estas palabras no aporta informacion de interes, se procede a eliminar todos aquellos 
+  # bigramas que contienen alguna stopword. Separacion de los bigramas 
+  unigrams_separados <- unigramas %>% separate(unigrama, c("palabra1"), sep = " ")
+  
+  # Filtrado de los bigramas que contienen alguna stopword
+  unigrams_separados <- unigrams_separados  %>%
+    filter(!palabra1 %in% lista_stopwords)
+    
+  # Union de las palabras para formar de nuevo los bigramas
+  unigramas <- unigrams_separados %>%
+    unite(unigrama, palabra1, sep = " ") 
+  
+  
+  # Identificamos ahora los bigramas mas frecuentes
+  return(head(unigramas %>% dplyr::count(unigrama, sort = TRUE), 10))
+}
+# Una forma mas visual e informativa de analizar las relaciones entre palabras es 
+# mediante el uso de redes de n-gramas.
+
+```
+
+Bigramas, unigramas y trigramas en función del segmento de puntuación
+```{r}
+#bigramas
+bigrama(datos_promotor)
+bigrama(datos_detractor) 
+
+#unigramas
+unigrama(datos_promotor)
+unigrama(datos_detractor)
+
+#trigramas
+trigrama(datos_promotor)
+trigrama(datos_detractor)
+```
+Bigramas por habitos de compra
+```{r}
+datos_prueba_bigramas <- datos
+
+dfs <- split(datos_prueba_bigramas, f = list(datos_prueba_bigramas$habitoscompra))
+
+prueba <- lapply(dfs, bigrama)
+prueba
+```
+Unigramas por habitos de compra
+```{r}
+
+datos_prueba_unigramas <- datos
+
+dfs <- split(datos_prueba_unigramas, f = list(datos_prueba_unigramas$habitoscompra))
+
+prueba <- lapply(dfs, unigrama)
+prueba
+```
+
+Gráfico de bigramas y trigramas
+```{r}
+#gráfico bigramas
+graph <- bigramas %>%
+  separate(bigrama, c("palabra1", "palabra2"), sep = " ") %>% 
+  dplyr::count(palabra1, palabra2, sort = TRUE) %>%
+  filter(n > 200) %>% graph_from_data_frame(directed = FALSE)
+
+plot(graph, vertex.label.font = 2,
+     vertex.label.color = "black",
+     vertex.label.cex = 0.7, edge.color = "gray85", title= "Bigramas")
+
+#grafico trigramas
+graph <- trigramas %>%
+  separate(trigrama, c("palabra1", "palabra2", "palabra3"), sep = " ") %>% 
+  dplyr::count(palabra1, palabra2, palabra3, sort = TRUE) %>%
+  filter(n > 500) %>% graph_from_data_frame(directed = FALSE)
+
+plot(graph, vertex.label.font = 3,
+     vertex.label.color = "black",
+     vertex.label.cex = 0.7, edge.color = "gray85", title= "Trigramas")
+```
+
+Bigramas con segunda palabra = agobios
+```{r}
+# Obtenemos el bigramas (concatenacion de 2 palabras)
+  bigramas_agobios <- datos_promotor %>% mutate(texto = limpiar(datos_promotor$comentarios)) %>%
+    select(texto) %>% unnest_tokens(input = texto, output = "bigrama",
+    token = "ngrams",n = 2, drop = TRUE)
+  
+  # Frecuencia de ocurrencias de cada bigrama
+  bigramas %>% dplyr::count(bigrama, sort = TRUE)
+  
+  # Los bigramas mas frecuentes son los formados por stopwords. Como la relacion entre 
+  # estas palabras no aporta informacion de interes, se procede a eliminar todos aquellos 
+  # bigramas que contienen alguna stopword. Separacion de los bigramas 
+  bigrams_separados <- bigramas %>% separate(bigrama, c("palabra1", "palabra2"), sep = " ")
+  
+  # Filtrado de los bigramas que contienen alguna stopword
+  bigrams_separados <- bigrams_separados  %>%
+    filter(palabra2 == "agobios")
+  
+  bigrams_separados <- bigrams_separados  %>%
+    filter(!palabra1 %in% Sin_sin)
+  
+  # Union de las palabras para formar de nuevo los bigramas
+  bigramas <- bigrams_separados %>%
+    unite(bigrama, palabra1, palabra2, sep = " ")
+  
+  #Bigramas con podrido 
+  #bigramas_podrido <- bigrams_separados %>% filter(palabra2 == "podrido") %>% count(palabra1, sort = TRUE)      
+  
+  #print(bigramas_podrido)
+  
+
+  
+  # Identificamos ahora los bigramas mas frecuentes
+  print(bigramas %>% dplyr::count(bigrama, sort = TRUE))
+
+# Una forma mas visual e informativa de analizar las relaciones entre palabras es 
+# mediante el uso de redes de n-gramas.
+```
+Bigrama con segunda palabra = pulpo
+```{r}
+# Obtenemos el bigramas (concatenacion de 2 palabras)
+  bigramas_agobios <- datos_promotor %>% mutate(texto = limpiar(datos_promotor$comentarios)) %>%
+    select(texto) %>% unnest_tokens(input = texto, output = "bigrama",
+    token = "ngrams",n = 2, drop = TRUE)
+  
+  # Frecuencia de ocurrencias de cada bigrama
+  bigramas %>% dplyr::count(bigrama, sort = TRUE)
+  
+  # Los bigramas mas frecuentes son los formados por stopwords. Como la relacion entre 
+  # estas palabras no aporta informacion de interes, se procede a eliminar todos aquellos 
+  # bigramas que contienen alguna stopword. Separacion de los bigramas 
+  bigrams_separados <- bigramas %>% separate(bigrama, c("palabra1", "palabra2"), sep = " ")
+  
+  # Filtrado de los bigramas que contienen alguna stopword
+  bigrams_separados <- bigrams_separados  %>%
+    filter(palabra2 == "pulpo")
+  
+  bigrams_separados <- bigrams_separados  %>%
+    filter(!palabra1 %in% Sin_sin)
+  
+  # Union de las palabras para formar de nuevo los bigramas
+  bigramas <- bigrams_separados %>%
+    unite(bigrama, palabra1, palabra2, sep = " ")
+  
+  #Bigramas con podrido 
+  #bigramas_podrido <- bigrams_separados %>% filter(palabra2 == "podrido") %>% count(palabra1, sort = TRUE)      
+  
+  #print(bigramas_podrido)
+  
+
+  
+  # Identificamos ahora los bigramas mas frecuentes
+  print(bigramas %>% dplyr::count(bigrama, sort = TRUE))
+
+# Una forma mas visual e informativa de analizar las relaciones entre palabras es 
+# mediante el uso de redes de n-gramas.
+```
+
+### 6.	Estadístico TF – IDF (frecuencia de términos corregidos)
+
+Uno de los principales intereses en text mining es cuantificar la tematica de un texto, asi como # la importancia de cada termino que lo forma. Una manera sencilla de medir la importancia de un termino # dentro de un documento es utilizando la frecuencia con la que aparece (Term Frequency) que se denota por tf.
+Esta aproximacion, aunque simple, tiene la limitacion de atribuir mucha importancia a aquellas palabras que aparecen muchas veces aunque no aporten informacion selectiva. Por ejemplo, si la palabra matematicas aparece 5 veces en un documento y la palabra pagina aparece 50, la segunda tendra 10 veces mas peso a pesar de que no aporte tanta informacion. 
+Para solucionar este problema se pueden ponderar los valores tf multiplicandolos por la inversa de la frecuencia con la que el termino en cuestion aparece en el resto de documentos del corpus (Inverse Document Frequency) que se denota por idf. De esta forma, se consigue reducir el valor de aquellos terminos que aparecen en muchos documentos y que, por lo tanto, no aportan informacion selectiva. Por tanto, el estadistico tf-idf mide como de importante es un termino en un documento teniendo en cuenta la frecuencia con la que ese termino aparece en otros documentos. Veamos como lo calculamos. Primero, calcularemos el tf, luego el idf y por ultimo el estadístico tf-idf.
+
+Numero de veces que aparece cada termino por reseña
+
+```{r}
+convert_tfidf <- function(datos_tidy2){
+
+datos_tf <- datos_tidy2 %>% group_by(cod_encuesta, token) %>% dplyr::summarise(n = n())
+datos_tf <- datos_tf %>% mutate(total_n = sum(n))
+
+# Se calcula el tf (Term Frequency) de cada palabra. Es decir, tf(tÃ©rmino) = n(tÃ©rmino) / longitud documento
+datos_tf <- datos_tf %>% mutate(tf = n / total_n )
+head(datos_tf)
+
+# Comprobamos el numero total de documentos (reseñas)
+total_documentos = datos_tidy2$cod_encuesta %>% unique() %>% length()
+total_documentos
+
+# Numero de documentos en los que aparece cada termino
+datos_idf <- datos_tidy2 %>% distinct(token, cod_encuesta) %>% group_by(token) %>%
+  dplyr::summarise(n_documentos = n())
+
+# Se calcula el idf (Inverse Document Frequency) de cada palabras. Es decir, idf (tÃ©rmino) = log (n(documentos)/nd(ocumentos con el tÃ©rmino))
+datos_idf <- datos_idf %>% mutate(idf = n_documentos/ total_documentos) %>%
+              arrange(desc(idf))
+
+# Por ultimo, se obtiene el estadistico tf-idf
+datos_tf_idf <- left_join(x = datos_tf, y = datos_idf, by = "token") %>% ungroup()
+datos_tf_idf <- datos_tf_idf %>% mutate(tf_idf = tf * idf) %>% select(-cod_encuesta) 
+datos_tf_idf <- datos_tf_idf%>% group_by(token) %>%  arrange(desc(tf_idf))  %>% distinct()
+
+
+#datos_tf_idf <-group_by(datos_tf_idf,token)%>%summarise(n=n[1])
+#datos_tf_idf_2 <- datos_tf_idf %>% distinct(token, .keep_all = TRUE)
+
+  return(datos_tf_idf)
+} 
+```
+
+En este caso como podeis ver todos los terminos que aparecen una vez tienen el mismo valor de tf, sin embargo, dado que no todos los terminos aparecen con la misma frecuencia en el conjunto de todas las reseñas, la correccion de idf es distinta para cada una. Valores mas altos significan que tendran un mayor peso.
+```{r}
+datos_tfidf <-convert_tfidf(datos_tidy2)
+View(datos_tfidf)
+
+#top 10
+datos_tfidf_10 <- head(datos_tfidf, 10)
+View(datos_tfidf_10)
+```
+TF-IDF en función de los hábitos de compra
+```{r}
+convert_tfidf_habitos <- function(datos_tidy2){
+
+datos_tf <- datos_tidy2 %>% group_by(habitoscompra, token) %>% dplyr::summarise(n = n())
+datos_tf <- datos_tf %>% mutate(total_n = sum(n))
+
+# Se calcula el tf (Term Frequency) de cada palabra. Es decir, tf(tÃ©rmino) = n(tÃ©rmino) / longitud documento
+datos_tf <- datos_tf %>% mutate(tf = n / total_n )
+head(datos_tf)
+
+# Comprobamos el numero total de documentos (habitos)
+total_documentos = datos_tidy2$habitoscompra %>% unique() %>% length()
+total_documentos
+
+# Numero de habitos en los que aparece cada termino
+datos_idf <- datos_tidy2 %>% distinct(token, habitoscompra) %>% group_by(token) %>%
+  dplyr::summarise(n_documentos = n())
+
+# Se calcula el idf (Inverse Document Frequency) de cada palabras. Es decir, idf (tÃ©rmino) = log (n(documentos)/nd(ocumentos con el tÃ©rmino))
+datos_idf <- datos_idf %>% mutate(idf = log(total_documentos / n_documentos)) %>%
+              arrange(desc(idf))
+
+# Por ultimo, se obtiene el estadistico tf-idf
+datos_tf_idf <- left_join(x = datos_tf, y = datos_idf, by = "token") %>% ungroup()
+datos_tf_idf <- datos_tf_idf %>% mutate(tf_idf = tf * idf) %>% select(-habitoscompra) 
+datos_tf_idf <- datos_tf_idf%>% group_by(token) %>%  arrange(desc(tf_idf))  %>% distinct()
+
+
+#datos_tf_idf <-group_by(datos_tf_idf,token)%>%summarise(n=n[1])
+#datos_tf_idf_2 <- datos_tf_idf %>% distinct(token, .keep_all = TRUE)
+
+  return(datos_tf_idf)
+} 
+```
+
+```{r}
+datos_tfidf_habitos <-convert_tfidf_habitos(datos_tidy2)
+View(datos_tfidf_habitos)
+
+#top 10
+datos_tfidf_10_habitos <- head(datos_tfidf_habitos, 10)
+View(datos_tfidf_10_habitos)
+length(datos_tidy2$token)
+```
+
+# 3. ANALISIS DE SENTIMIENTO, POLARIDAD Y OPINION
+
+El enfoque semantico se caracteriza por el uso de diccionarios de terminos (lexicons) con orientacion semantica de polaridad u opinion. Tipicamente los sistemas preprocesan el texto y lo dividen en palabras, con la apropiada eliminacion de las palabras de parada (stopwords). Luego, se comprueba la aparicion de los terminos del lexicon para asignar el valor de polaridad del texto mediante la suma del valores de polaridad de los terminos. 
+
+En este primer ejemplo vamos a analizar el sentimiento de las reseñas. En este caso, vamos a estudiar la opinion o polaridad sobre estas reseñas. La metodologia a seguir sería la siguiente (3 etapas):
+
+## 3.1 Sentimiento promedio de cada reseña
+
+Empleamos la clasificacion Promotor/negativo proporcionada por el diccionario bing (libreria tidytext)
+
+```{r}
+sentimientos <- get_sentiments(lexicon = "bing")
+head(sentimientos)
+```
+
+```{r}
+sentimientos <- sentimientos %>% mutate(valor = if_else(sentiment == "negative", -1, 1))
+sentimientos
+```
+
+La versión que usaremos es una traducción automática, de inglés a español, de la versión del léxico presente en el conjunto de datos sentiments de tidytext, con algunas correcciones manuales. Por supuesto, esto quiere decir que este léxico tendrá algunos defectos, pero será suficiente para nuestro análisis.
+```{r}
+download.file("https://raw.githubusercontent.com/jboscomendoza/rpubs/master/sentimientos_afinn/lexico_afinn.en.es.csv",
+              "lexico_afinn.en.es.csv")
+afinn <- read.csv("lexico_afinn.en.es.csv", stringsAsFactors = F, fileEncoding = "latin1") %>% 
+  tbl_df()
+afinn
+```
+
+###A tribución de sentimiento a las palabras
+Al disponer de los datos en formato tidy (una palabra por fila), mediante un inner join se anade a cada palabra su sentimiento y se filtran automaticamente todas aquellas palabras para las que no hay informacion disponible.
+```{r}
+#CON BING
+datos_sent_S <- inner_join(x = datos_tidy2, y = sentimientos,
+                          by = c("token" = "word"))
+view(datos_sent_S)
+
+#CON AFINN
+datos_sent_A <- inner_join(x = datos_tidy2, y = afinn,
+                          by = c("token" = "Palabra"))
+view(datos_sent_A)
+
+length(datos_tidy2$token)
+length(datos_sent_A$token)
+length(datos_sent_S$token) #al haber tan pocas palabras clasificadas a través de esta librería he considerado más conveniente emplear la librería AFINN unicamente
+```
+
+Se suman los sentimientos de las palabras que forman cada reseña.
+```{r}
+datos_media_sentimientos <- datos_sent_A %>% group_by(cod_encuesta, ciudad_tienda, habitoscompra) %>%
+  dplyr::summarise(sentimiento_promedio = sum(Puntuacion))
+datos_media_sentimientos
+```
+Creo una nueva variable de tipo de sentimiento en funcion de las puntuaciones obtenidas para cada token según la librería bing affin. También llevare el mismo proceso para crear una variable de sentimiento en funcion de la puntuación media obtenida en cada reseña. 
+
+```{r} 
+datos_sent_A$tipo_sentimiento = ifelse(datos_sent_A$Puntuacion < 0,'Detractor',ifelse(datos_sent_A$Puntuacion > 0, 'Promotor','Error')) #clasificamos los tokens solo en negativo y Promotor ya que no tenemos ningún con valor 0 que sería el neutro. 
+datos_sent_A
+
+
+datos_media_sentimientos$tipo_sentimiento_medio = ifelse(datos_media_sentimientos$sentimiento_promedio< 0,'Detractor',ifelse(datos_media_sentimientos$sentimiento_promedio == 0 ,'Pasivo',ifelse(datos_media_sentimientos$sentimiento_promedio > 0, 'Promotor','Error')))
+```
+
+Ahora procedemos a graficar la frecuencia de sentimientos negativos, Promotors y neutros de los tokens (AFFIN)
+```{r}
+ggplot(data = datos_sent_A) + geom_bar(mapping = aes(x = tipo_sentimiento), fill = c('red','lightgreen')) + coord_flip() + theme_bw() + labs(title = "Gráfico de frecuencias de sentimiento de tokens", x = "Tipo de sentimiento", y = "Total de tokens")
+```
+También procedemos a graficar la frecuencia de sentimientos negativos y Promotors de las reseñas (AFFIN)
+```{r}
+ggplot(data = datos_media_sentimientos) + geom_bar(mapping = aes(x = tipo_sentimiento_medio), fill = c('red','lightblue', 'lightgreen')) + coord_flip() + theme_bw() + labs(title = "Gráfico de frecuencias de sentimiento de reseñas", x = "Tipo de sentimiento", y = "Total de reseñas")
+```
+### Palabras positivas y negativas más comunes
+
+```{r}
+afinn_word_counts <- datos_sent_A %>%
+  count(token, tipo_sentimiento, sort = TRUE) %>%
+  ungroup()
+afinn_word_counts
+
+afinn_word_counts_2 <- datos_sent_A %>%
+  count(token, Puntuacion, sort = TRUE) %>%
+  ungroup()
+afinn_word_counts_2
+
+
+afinn_word_counts %>%
+  group_by(tipo_sentimiento) %>%
+  slice_max(n, n = 10) %>% 
+  ungroup() %>%
+  mutate(word = reorder(token, n)) %>%
+  ggplot(aes(n, word, fill = tipo_sentimiento)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~tipo_sentimiento, scales = "free_y") +
+  labs(x = "Contribution to tipo_puntuacion",
+       y = NULL)
+view(datos_sent_A)
+```
+
+## 3.2 Porcentaje de reseñas Promotors, negativos y neutros 
+
+
+```{r}
+#CON AFINN
+datos_media_sentimientos %>% group_by(habitoscompra, cod_encuesta) %>%
+  dplyr::summarise(sentimiento_promedio) %>%
+  group_by(habitoscompra) %>%
+  dplyr::summarise(Promotors = 100 * sum(sentimiento_promedio > 0) / n(),
+            neutros = 100 * sum(sentimiento_promedio == 0) / n(),
+            negativos = 100 * sum(sentimiento_promedio  < 0) / n())
+```
+Podemos visualizarlo graficamente del siguiente modo (agrupado por habitos de compra)
+```{r}
+datos_media_sentimientos %>% group_by(habitoscompra, cod_encuesta) %>%
+  dplyr::summarise(sentimiento_promedio) %>%
+  group_by(habitoscompra) %>%
+  dplyr::summarise(positivos = 100 * sum(sentimiento_promedio > 0) / n(),
+            neutros = 100 * sum(sentimiento_promedio == 0) / n(),
+            negativos = 100 * sum(sentimiento_promedio  < 0) / n()) %>%
+  gather(key = "sentimiento", value = "valor", -habitoscompra) %>%
+  ggplot(aes(x = habitoscompra, y = valor, fill = sentimiento)) + 
+  geom_col(position = "dodge", color = "black") + coord_flip() +
+  theme_bw() + ggtitle("Porcentaje de reseñas negativas, positivas y neutras dependiendo de los hábitos de compra")
+```
+
+```{r}
+#gráfico de procentaje de sentimiento Promotor en funcion de los habitos de compra
+datos_media_sentimientos %>% group_by(habitoscompra, cod_encuesta) %>%
+  dplyr::summarise(sentimiento_promedio) %>%
+  group_by(habitoscompra) %>%
+  dplyr::summarise(Promotors = 100*sum(sentimiento_promedio > 0) / n()) %>%
+  ungroup() %>%
+  gather(key = "sentimiento", value = "valor", -habitoscompra) %>%
+  ggplot(aes(x = reorder(habitoscompra,valor), y = valor, fill = sentimiento)) + 
+  geom_col(position = "dodge", color = "black") + coord_flip() +
+  theme_bw() + labs(title = "Gráfico de procentaje de sentimiento Promotor en funcion de los habitos de compra", y = "Porcentaje", x = "Hábitos de compra")
+
+#gráfico de procentaje de sentimiento negativo en funcion de los habitos de compra
+datos_media_sentimientos %>% group_by(habitoscompra, cod_encuesta) %>%
+  dplyr::summarise(sentimiento_promedio) %>%
+  group_by(habitoscompra) %>%
+  dplyr::summarise(negativos = 100*sum(sentimiento_promedio < 0) / n()) %>%
+  ungroup() %>%
+  gather(key = "sentimiento", value = "valor", -habitoscompra) %>%
+  ggplot(aes(x = reorder(habitoscompra, valor), y = valor, fill= sentimiento)) + 
+  geom_col(position = "dodge", color = "black") + coord_flip() +
+  theme_bw() + labs(title = "Gráfico de procentaje de sentimiento negativo en funcion de los habitos de compra", y = "Porcentaje", x = "Hábitos de compra") 
+```
+
+```{r}
+datos_ciudades_frecuentes <- filter(datos_media_sentimientos, ciudad_tienda %in% c("Alcobendas", "Hortaleza", "San Blas - Las Rosas", "Salamanca", "Majadahonda", "Valladolid Parquesol", "Aluche", "Actur Zaragoza", "Mostoles", "La Gavia", "Sestao", "Augusta Zaragoza", "San Sebastian de los Reyes"))
+
+datos_ciudades_frecuentes %>% group_by(ciudad_tienda, cod_encuesta) %>%
+  dplyr::summarise(sentimiento_promedio) %>%
+  group_by(ciudad_tienda) %>%
+  dplyr::summarise(Promotors = 100 * sum(sentimiento_promedio > 0) / n(),
+            neutros = 100 * sum(sentimiento_promedio == 0) / n(),
+            negativos = 100 * sum(sentimiento_promedio  < 0) / n()) %>%
+  gather(key = "sentimiento", value = "valor", -ciudad_tienda) %>%
+  ggplot(aes(x = ciudad_tienda, y = valor, fill = sentimiento)) + 
+  geom_col(position = "dodge", color = "black") + coord_flip() +
+  theme_bw() + ggtitle("Porcentaje de reseñas Detractors, positivas y Pasivos dependiendo de las ciudades con más reseñas")
+```
+
+```{r}
+#gráfico de procentaje de sentimiento positivo en funcion de las localizaciones de las tiendas
+datos_ciudades_frecuentes %>% group_by(ciudad_tienda, cod_encuesta) %>%
+  dplyr::summarise(sentimiento_promedio) %>%
+  group_by(ciudad_tienda) %>%
+  dplyr::summarise(Promotors = 100*sum(sentimiento_promedio > 0) / n()) %>%
+  ungroup() %>%
+  gather(key = "sentimiento", value = "valor", -ciudad_tienda) %>%
+  ggplot(aes(x = reorder(ciudad_tienda,valor), y = valor, fill = sentimiento)) + 
+  geom_col(position = "dodge", color = "black") + coord_flip() +
+  theme_bw() + labs(title = "Gráfico de procentaje de sentimiento Promotor en funcion de los habitos de compra", y = "Porcentaje", x = "Hábitos de compra")
+
+#gráfico de procentaje de sentimiento negativo en funcion de las localizaciones de las tiendas
+datos_ciudades_frecuentes %>% group_by(ciudad_tienda, cod_encuesta) %>%
+  dplyr::summarise(sentimiento_promedio) %>%
+  group_by(ciudad_tienda) %>%
+  dplyr::summarise(negativos = 100*sum(sentimiento_promedio < 0) / n()) %>%
+  ungroup() %>%
+  gather(key = "sentimiento", value = "valor", -ciudad_tienda) %>%
+  ggplot(aes(x = reorder(ciudad_tienda, valor), y = valor, fill= sentimiento)) + 
+  geom_col(position = "dodge", color = "black") + coord_flip() +
+  theme_bw() + labs(title = "Gráfico de procentaje de sentimiento negativo en funcion de los habitos de compra", y = "Porcentaje", x = "Hábitos de compra") 
+```
+
+## Uso de bigramas para proporcionar contexto en el analisis de sentimientos
+El estudio de sentimietnos anterioror simplemente tenia encuenta una palabra positiva o negativa. En algunas ocasiones es necesario el estudio de las palabras cercanas a estas ya que pueden cambiar el contexto de menera radical. Un claro ejemplo sería la palabra "gusta" que en el caso de que tuviese un no delante cambiría por completo el signficado del mensaje. 
+
+```{r}
+quitar = c("no")
+
+Sin_no = removeWords(lista_stopwords,quitar)
+#view(Sin_no)
+
+  bigramas <- datos %>% mutate(texto = limpiar(datos$comentarios)) %>%
+    select(texto) %>% unnest_tokens(input = texto, output = "bigrama",
+    token = "ngrams",n = 2, drop = TRUE)
+  
+  # Frecuencia de ocurrencias de cada bigrama
+  bigramas %>% dplyr::count(bigrama, sort = TRUE)
+  
+  # Los bigramas mas frecuentes son los formados por stopwords. Como la relacion entre 
+  # estas palabras no aporta informacion de interes, se procede a eliminar todos aquellos 
+  # bigramas que contienen alguna stopword. Separacion de los bigramas 
+  bigrams_separados <- bigramas %>% separate(bigrama, c("palabra1", "palabra2"), sep = " ")
+  
+  # Filtrado de los bigramas que contienen alguna stopword
+  bigrams_separados <- bigrams_separados  %>%
+    filter(!palabra1 %in% Sin_no)
+  
+  bigrams_separados <- bigrams_separados  %>%
+    filter(!palabra2 %in% Sin_no)
+  
+  # Union de las palabras para formar de nuevo los bigramas
+  bigramas <- bigrams_separados %>%
+    unite(bigrama, palabra1, palabra2, sep = " ")
+  
+  bigramas_con_no <- bigrams_separados %>% filter(palabra1 == "no") %>% count(palabra2, sort = TRUE)      
+  
+  print(bigramas_con_no)
+
+```
+
+Luego podemos examinar las palabras mas frecuentes que fueron predecidas por "no" y que se asociaron con un sentimiento
+
+```{r}
+not_words <- bigrams_separados %>%
+  filter(palabra1 == "no") %>%
+  inner_join(afinn, by = c(palabra2 = "Palabra")) %>%
+  count(palabra2, Puntuacion, sort = TRUE)
+not_words
+#Por ejemplo una de las palabras con sentimiento positivo que más se repite es "ayuda", "mejora", "excelente" o incluso "amable"
+```
+
+Una vez visto esto, podemos graficar que palabras son las que de alguna manera han sido mas identificado con un sentimiento más equivocado. 
+
+```{r}
+
+not_words %>%
+  mutate(contribution = n * Puntuacion) %>%
+  arrange(desc(abs(contribution))) %>%
+  head(20) %>%
+  mutate(palabra2 = reorder(palabra2, contribution)) %>%
+  ggplot(aes(n * Puntuacion, palabra2, fill = n * Puntuacion > 0)) +
+  geom_col(show.legend = FALSE) +
+  labs(x = "Sentiment value * number of occurrences",
+       y = "Words preceded by \"not\"")
+```
+Además de la palabra "no" también hay otras palabras que pueden proporcionar contexto para la siguiente palabra. 
+- Palabra sin
+
+```{r}
+
+quitar = c("sin")
+
+Sin_sin = removeWords(lista_stopwords,quitar)
+view(Sin_sin)
+
+  bigramas <- datos %>% mutate(texto = limpiar(datos$comentarios)) %>%
+    select(texto) %>% unnest_tokens(input = texto, output = "bigrama",
+    token = "ngrams",n = 2, drop = TRUE)
+  
+  # Frecuencia de ocurrencias de cada bigrama
+  bigramas %>% dplyr::count(bigrama, sort = TRUE)
+  
+  # Los bigramas mas frecuentes son los formados por stopwords. Como la relacion entre 
+  # estas palabras no aporta informacion de interes, se procede a eliminar todos aquellos 
+  # bigramas que contienen alguna stopword. Separacion de los bigramas 
+  bigrams_separados <- bigramas %>% separate(bigrama, c("palabra1", "palabra2"), sep = " ")
+  
+  # Filtrado de los bigramas que contienen alguna stopword
+  bigrams_separados <- bigrams_separados  %>%
+    filter(!palabra1 %in% Sin_sin)
+  
+  bigrams_separados <- bigrams_separados  %>%
+    filter(!palabra2 %in% Sin_sin)
+  
+  # Union de las palabras para formar de nuevo los bigramas
+  bigramas <- bigrams_separados %>%
+    unite(bigrama, palabra1, palabra2, sep = " ")
+  
+  bigramas_con_no <- bigrams_separados %>% filter(palabra1 == "sin") %>% count(palabra2, sort = TRUE)      
+  
+  print(bigramas_con_no)
+
+
+```
+```{r}
+#Palabras que tenian la palabra "sin" delante y se predijo su sentimiento
+without_words <- c("sin")
+
+sin_words <- bigrams_separados %>%
+  filter(palabra1 %in% without_words) %>%
+  inner_join(afinn, by = c(palabra2 = "Palabra")) %>%
+  count(palabra1, palabra2, Puntuacion, sort = TRUE)
+sin_words
+
+#viasualización del impacto del uso de "sin"
+sin_words %>%
+  mutate(contribution = n * Puntuacion) %>%
+  arrange(desc(abs(contribution))) %>%
+  head(20) %>%
+  mutate(palabra2 = reorder(palabra2, contribution)) %>%
+  ggplot(aes(n * Puntuacion, palabra2, fill = n * Puntuacion > 0)) +
+  geom_col(show.legend = FALSE) +
+  labs(x = "Puntuación de sentimiento * número de ocurrencias",
+       y = "Plabras predecidas por `sin´")
+```
+
+- palabra nunca
+```{r}
+#Nunca
+never_words <- c("nunca")
+
+nunca_words <- bigrams_separados %>%
+  filter(palabra1 %in% never_words) %>%
+  inner_join(afinn, by = c(palabra2 = "Palabra")) %>%
+  count(palabra1, palabra2, Puntuacion, sort = TRUE)
+nunca_words
+```
+
+```{r}
+nunca_words %>%
+  mutate(contribution = n * Puntuacion) %>%
+  arrange(desc(abs(contribution))) %>%
+  head(20) %>%
+  mutate(palabra2 = reorder(palabra2, contribution)) %>%
+  ggplot(aes(n * Puntuacion, palabra2, fill = n * Puntuacion > 0)) +
+  geom_col(show.legend = FALSE) +
+  labs(x = "Puntuación de sentimiento * número de ocurrencias",
+       y = "Plabras predecidas por `nunca´")
+```
+
+
+## 3.3 Evolucion de los sentimientos en funcion del tiempo 
+
+A continuacion, se estudia como varia el sentimiento promedio de los tweets agrupados por intervalos de un mes para cada uno de los usuarios. Podemos ver como la distribucion del sentimiento promedio de los comentarios se mantiene aproximadamente constante para los 2 usuarios. Existen ciertas oscilaciones, pero todas ellas dentro del rango de sentimiento Promotor.
+
+
+```{r}
+view(datos_media_sentimientos)
+datos_sent_A %>% mutate(anyo = year(fecha_encuesta),
+                       mes = month(fecha_encuesta),
+                       anyo_mes = ymd(paste(anyo, mes, sep="-"),truncated=2)) %>%
+  group_by(anyo_mes) %>%
+  dplyr::summarise(sentimiento = mean(Puntuacion)) %>%
+  ungroup() %>%
+  ggplot(aes(x = anyo_mes, y = sentimiento)) +
+  geom_point() + 
+  geom_smooth(formula = y ~ x, method = 'loess') + 
+  labs(x = "fecha de publicaciónn") +
+  theme_bw() +
+  theme(legend.position = "none") + ggtitle("Evolución de los sentimientos en función del tiempo")
+
+```
